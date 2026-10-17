@@ -1,0 +1,109 @@
+<?php
+
+declare(strict_types=1);
+
+namespace SugarCraft\Async;
+
+/**
+ * Manages multiple subscriptions as a single atomic unit.
+ *
+ * Used in the TEA model's subscriptions() lifecycle \u2014 when the
+ * model returns many subscriptions, they are composed into one handle
+ * so the runtime can dispose them all with a single unsubscribe() call.
+ *
+ * Mirrors RxJS's Subscription group pattern.
+ */
+final class Subscriptions implements Subscription
+{
+    /** @var list<Subscription> */
+    private array $subscriptions = [];
+
+    private bool $unsubscribed = false;
+
+    /**
+     * Compose multiple subscriptions into a single atomic handle.
+     *
+     * @param Subscription ...$subscriptions
+     */
+    public static function compose(Subscription ...$subscriptions): self
+    {
+        $composer = new self();
+        foreach ($subscriptions as $sub) {
+            $composer->add($sub);
+        }
+        return $composer;
+    }
+
+    /**
+     * Add a subscription to this composite.
+     *
+     * @internal
+     */
+    public function add(Subscription $subscription): void
+    {
+        if ($subscription === $this) {
+            // Guard against self-composition to prevent infinite recursion.
+            return;
+        }
+        if ($this->unsubscribed === true) {
+            // Already disposed \u2014 dispose the new subscription immediately.
+            $subscription->unsubscribe();
+            return;
+        }
+        $this->subscriptions[] = $subscription;
+    }
+
+    public function unsubscribe(): void
+    {
+        if ($this->unsubscribed) {
+            return;
+        }
+        $this->unsubscribed = true;
+        $this->disposeAll();
+    }
+
+    public function isActive(): bool
+    {
+        return !$this->unsubscribed;
+    }
+
+    public function count(): int
+    {
+        return count($this->subscriptions);
+    }
+
+    public function isEmpty(): bool
+    {
+        return $this->subscriptions === [];
+    }
+
+    /**
+     * Dispose all underlying subscriptions.
+     *
+     * A throwing unsubscribe() on one subscription must not leak the rest:
+     * every subscription is disposed, then the FIRST caught exception is
+     * rethrown so the failure still surfaces to the caller.
+     *
+     * @internal
+     */
+    public function disposeAll(): void
+    {
+        // Snapshot then clear up-front so the list is empty even if a
+        // subscription's unsubscribe() throws.
+        $subscriptions = $this->subscriptions;
+        $this->subscriptions = [];
+
+        $firstError = null;
+        foreach ($subscriptions as $subscription) {
+            try {
+                $subscription->unsubscribe();
+            } catch (\Throwable $e) {
+                $firstError ??= $e;
+            }
+        }
+
+        if ($firstError !== null) {
+            throw $firstError;
+        }
+    }
+}
